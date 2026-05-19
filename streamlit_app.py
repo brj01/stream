@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import boto3
 import streamlit as st
 import streamlit.components.v1 as components
+from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 
 try:
     from imageio_ffmpeg import get_ffmpeg_exe
@@ -157,6 +158,17 @@ def build_s3_client(region: str, access_key: str, secret_key: str, session_token
     if session_token:
         kwargs["aws_session_token"] = session_token
     return boto3.client("s3", **kwargs)
+
+
+def aws_credentials_available(region: str, access_key: str, secret_key: str, session_token: str) -> bool:
+    if access_key and secret_key:
+        return True
+    session = boto3.Session(region_name=region or None)
+    creds = session.get_credentials()
+    if creds is None:
+        return False
+    frozen = creds.get_frozen_credentials()
+    return bool(frozen.access_key and frozen.secret_key)
 
 
 def worker_name_from_state_key(key: str) -> str:
@@ -1289,6 +1301,8 @@ def main() -> None:
             access_key = st.text_input("AWS Access Key ID", value=APP_DEFAULTS.get("access_key", ""))
             secret_key = st.text_input("AWS Secret Access Key", value=APP_DEFAULTS.get("secret_key", ""), type="password")
             session_token = st.text_input("AWS Session Token", value=APP_DEFAULTS.get("session_token", ""), type="password")
+            if not (access_key and secret_key):
+                st.caption("On Streamlit Community Cloud, add AWS secrets in App settings -> Secrets, or paste temporary credentials here.")
 
         custom_rank_json = st.text_area(
             "Stage rank map (JSON)",
@@ -1298,8 +1312,20 @@ def main() -> None:
         url_expiry = st.number_input("Presigned URL expiry (sec)", min_value=60, max_value=86400, value=int(APP_DEFAULTS.get("url_expiry", 3600)))
         run_load = st.button("Load from S3", type="primary")
 
-    if APP_DEFAULTS.get("auto_load_on_start", False) and not run_load and "s3_review_loaded" not in st.session_state:
+    creds_available = aws_credentials_available(region, access_key, secret_key, session_token)
+
+    if (
+        APP_DEFAULTS.get("auto_load_on_start", False)
+        and not run_load
+        and "s3_review_loaded" not in st.session_state
+        and creds_available
+    ):
         run_load = True
+    elif not creds_available and "s3_review_loaded" not in st.session_state:
+        st.info(
+            "AWS credentials are not configured yet. In Streamlit Community Cloud, open App settings -> Secrets and add "
+            "`AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`, `S3_BUCKET`, and `S3_WORKERS_PREFIX`."
+        )
 
     if run_load:
         if not bucket:
@@ -1318,6 +1344,13 @@ def main() -> None:
         try:
             client = build_s3_client(region, access_key, secret_key, session_token)
             worker_files = load_worker_artifacts(client, bucket, workers_prefix)
+        except (NoCredentialsError, PartialCredentialsError):
+            st.error("AWS credentials are missing or incomplete.")
+            st.info(
+                "Set the AWS values in Streamlit Community Cloud under App settings -> Secrets, or paste temporary "
+                "credentials into the sidebar and click `Load from S3` again."
+            )
+            return
         except Exception as exc:
             st.exception(exc)
             return
