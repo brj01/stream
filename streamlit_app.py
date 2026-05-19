@@ -3,6 +3,7 @@ import json
 import csv
 import random
 import re
+import shutil
 import zipfile
 import subprocess
 import hashlib
@@ -15,6 +16,11 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import boto3
 import streamlit as st
 import streamlit.components.v1 as components
+
+try:
+    from imageio_ffmpeg import get_ffmpeg_exe
+except Exception:
+    get_ffmpeg_exe = None
 
 
 def _get_secret(name: str, default: str = "") -> str:
@@ -1018,10 +1024,24 @@ def video_bytes_to_data_url(video_bytes: bytes) -> str:
     return "data:video/mp4;base64," + base64.b64encode(video_bytes).decode("ascii")
 
 
+def get_ffmpeg_binary() -> str:
+    configured = os.getenv("FFMPEG_BINARY", "").strip()
+    if configured:
+        return configured
+    system_ffmpeg = shutil.which("ffmpeg")
+    if system_ffmpeg:
+        return system_ffmpeg
+    if get_ffmpeg_exe is not None:
+        return get_ffmpeg_exe()
+    raise RuntimeError(
+        "ffmpeg is not available. Set FFMPEG_BINARY, install ffmpeg, or add imageio-ffmpeg."
+    )
+
+
 def extract_wav_from_mp4(mp4_path: Path, wav_path: Path, target_sr: int = 16000) -> None:
     wav_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "ffmpeg",
+        get_ffmpeg_binary(),
         "-y",
         "-i",
         str(mp4_path),
@@ -1043,7 +1063,7 @@ def extract_wav_from_mp4(mp4_path: Path, wav_path: Path, target_sr: int = 16000)
 def transcode_mp4_for_web(input_mp4_path: Path, output_mp4_path: Path) -> None:
     output_mp4_path.parent.mkdir(parents=True, exist_ok=True)
     cmd = [
-        "ffmpeg",
+        get_ffmpeg_binary(),
         "-y",
         "-i",
         str(input_mp4_path),
