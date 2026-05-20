@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import boto3
 import streamlit as st
 import streamlit.components.v1 as components
+from botocore.exceptions import ClientError
 from botocore.exceptions import NoCredentialsError, PartialCredentialsError
 
 try:
@@ -33,14 +34,30 @@ def _get_secret(name: str, default: str = "") -> str:
     return str(os.getenv(name, default))
 
 
+PLACEHOLDER_SECRET_VALUES = {
+    "YOUR_REAL_KEY",
+    "YOUR_REAL_SECRET",
+    "YOUR_ACCESS_KEY",
+    "YOUR_SECRET_KEY",
+    "REPLACE_IN_STREAMLIT_CLOUD",
+}
+
+
+def normalize_config_value(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw in PLACEHOLDER_SECRET_VALUES:
+        return ""
+    return raw
+
+
 APP_DEFAULTS = {
-    "bucket": _get_secret("S3_BUCKET", "dataset-avt-fyp"),
-    "workers_prefix": _get_secret("S3_WORKERS_PREFIX", "new35hoursfixedia_worker_strict_single/state"),
-    "fallback_clips_prefix": _get_secret("S3_FALLBACK_CLIPS_PREFIX", ""),
-    "region": _get_secret("AWS_REGION", "eu-north-1"),
-    "access_key": _get_secret("AWS_ACCESS_KEY_ID", ""),
-    "secret_key": _get_secret("AWS_SECRET_ACCESS_KEY", ""),
-    "session_token": _get_secret("AWS_SESSION_TOKEN", ""),
+    "bucket": normalize_config_value(_get_secret("S3_BUCKET", "dataset-avt-fyp")),
+    "workers_prefix": normalize_config_value(_get_secret("S3_WORKERS_PREFIX", "new35hoursfixedia_worker_strict_single/state")),
+    "fallback_clips_prefix": normalize_config_value(_get_secret("S3_FALLBACK_CLIPS_PREFIX", "")),
+    "region": normalize_config_value(_get_secret("AWS_REGION", "eu-north-1")),
+    "access_key": normalize_config_value(_get_secret("AWS_ACCESS_KEY_ID", "")),
+    "secret_key": normalize_config_value(_get_secret("AWS_SECRET_ACCESS_KEY", "")),
+    "session_token": normalize_config_value(_get_secret("AWS_SESSION_TOKEN", "")),
     "url_expiry": 3600,
     "auto_load_on_start": True,
     "sample_output_dir": "testing/s3_review_samples",
@@ -149,18 +166,24 @@ def best_payload_ts(payload: Dict[str, Any]) -> Optional[datetime]:
 
 
 def build_s3_client(region: str, access_key: str, secret_key: str, session_token: str):
+    region = normalize_config_value(region)
+    access_key = normalize_config_value(access_key)
+    secret_key = normalize_config_value(secret_key)
+    session_token = normalize_config_value(session_token)
     kwargs: Dict[str, Any] = {}
     if region:
         kwargs["region_name"] = region
     if access_key and secret_key:
         kwargs["aws_access_key_id"] = access_key
         kwargs["aws_secret_access_key"] = secret_key
-    if session_token:
+    if access_key and secret_key and session_token:
         kwargs["aws_session_token"] = session_token
     return boto3.client("s3", **kwargs)
 
 
 def aws_credentials_available(region: str, access_key: str, secret_key: str, session_token: str) -> bool:
+    access_key = normalize_config_value(access_key)
+    secret_key = normalize_config_value(secret_key)
     if access_key and secret_key:
         return True
     session = boto3.Session(region_name=region or None)
@@ -1312,6 +1335,14 @@ def main() -> None:
         url_expiry = st.number_input("Presigned URL expiry (sec)", min_value=60, max_value=86400, value=int(APP_DEFAULTS.get("url_expiry", 3600)))
         run_load = st.button("Load from S3", type="primary")
 
+    bucket = normalize_config_value(bucket)
+    workers_prefix = normalize_config_value(workers_prefix)
+    fallback_clips_prefix = normalize_config_value(fallback_clips_prefix)
+    region = normalize_config_value(region)
+    access_key = normalize_config_value(access_key)
+    secret_key = normalize_config_value(secret_key)
+    session_token = normalize_config_value(session_token)
+
     creds_available = aws_credentials_available(region, access_key, secret_key, session_token)
 
     if (
@@ -1330,6 +1361,10 @@ def main() -> None:
     if run_load:
         if not bucket:
             st.error("Bucket is required.")
+            return
+        if session_token and not (access_key and secret_key):
+            st.error("AWS session token was provided without an access key and secret key.")
+            st.info("If you are using long-lived IAM user credentials, leave `AWS_SESSION_TOKEN` empty.")
             return
 
         try:
@@ -1351,6 +1386,17 @@ def main() -> None:
                 "credentials into the sidebar and click `Load from S3` again."
             )
             return
+        except ClientError as exc:
+            error_code = exc.response.get("Error", {}).get("Code", "")
+            if error_code in {"InvalidToken", "ExpiredToken", "InvalidClientTokenId", "SignatureDoesNotMatch"}:
+                st.error(f"AWS rejected the credentials: {error_code}")
+                st.info(
+                    "Check `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`. Leave `AWS_SESSION_TOKEN` empty unless "
+                    "you are using temporary STS credentials. If you are using temporary credentials, all three values "
+                    "must come from the same session."
+                )
+                return
+            raise
         except Exception as exc:
             st.exception(exc)
             return
